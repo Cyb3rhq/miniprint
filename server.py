@@ -18,7 +18,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 
 import socketserver
-from os.path import isfile, join
 import logging
 import select
 import sys
@@ -26,6 +25,58 @@ import traceback
 from printer import Printer
 import argparse
 import re
+import json
+from datetime import datetime, timezone
+
+
+class JSONFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        # Override to format time in ISO 8601 format with timezone-aware object
+        # return datetime.fromtimestamp(record.created, timezone.utc).replace(tzinfo=None)
+        return datetime.fromtimestamp(record.created, timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
+
+    def format(self, record):
+        log_record = {
+            'timestamp': self.formatTime(record),
+#            'level': record.levelname,
+            'info': record.getMessage()
+        }
+
+        # Add src_ip and dest_port from the filter if available
+        if hasattr(record, 'src_ip') and record.src_ip:
+            log_record['src_ip'] = record.src_ip
+        if hasattr(record, 'dest_port') and record.dest_port:
+            log_record['dest_port'] = record.dest_port
+
+        # Add fields only if their value is not "unknown"
+        additional_fields = {
+            'action': getattr(record, 'action', 'unknown'),
+            'command': getattr(record, 'command', 'unknown'),
+            'dir': getattr(record, 'dir', 'unknown'),
+            'event': getattr(record, 'event', 'unknown'),
+            'file_contents': getattr(record, 'file_contents', 'unknown'),
+            'file_name': getattr(record, 'file_name', 'unknown'),
+            'item': getattr(record, 'item', 'unknown'),
+            'job_text': getattr(record, 'job_text', 'unknown'),
+            'rdymsg': getattr(record, 'rdymsg', 'unknown'),
+            'response': getattr(record, 'response', 'unknown'),
+            'upload_file': getattr(record, 'upload_file', 'unknown')
+        }
+
+        log_record.update({k: v for k, v in additional_fields.items() if v != 'unknown'})
+        return json.dumps(log_record)
+
+
+class ConnectionFilter(logging.Filter):
+    def __init__(self, src_ip=None, dest_port=None):
+        super().__init__()
+        self.src_ip = src_ip
+        self.dest_port = dest_port
+
+    def filter(self, record):
+        record.src_ip = self.src_ip
+        record.dest_port = self.dest_port
+        return True
 
 
 parser = argparse.ArgumentParser(description='''miniprint - a medium interaction printer honeypot
@@ -52,17 +103,21 @@ log_location = args.log_file
 
 logger = logging.getLogger('miniprint')
 logger.setLevel(logging.DEBUG)
-# create file handler which logs even debug messages
+
+# Create file handler which logs even debug messages
 fh = logging.FileHandler(log_location)
 fh.setLevel(logging.DEBUG)
-# create console handler with a higher log level
+
+# Create console handler with a higher log level
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-# create formatter and add it to the handlers
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# Create formatter and add it to the handlers
+formatter = JSONFormatter()
 fh.setFormatter(formatter)
 ch.setFormatter(formatter)
-# add the handlers to the logger
+
+# Add the handlers to the logger
 logger.addHandler(fh)
 logger.addHandler(ch)
 
@@ -70,15 +125,16 @@ logger.addHandler(ch)
 class MyTCPHandler(socketserver.BaseRequestHandler):
     """
     The request handler class for our server.
-
+    
     It is instantiated once per connection to the server, and must
     override the handle() method to implement communication to the
     client.
     """
+
     @staticmethod
     def parse_commands(text):
         '''
-            Convert a string of commands to a list of commands. In the case of a print job (no @PJL prefix), append to the list untouched
+            Convert a string of commands to a list of commands.
 
             Examples:
                 Input:  "@PJL USTATUSOFF\r\n@PJL INFO ID\r\n@PJL ECHO DELIMITER58494\r\n\r\n"
@@ -101,18 +157,21 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
 
         return commands
 
-
-
     def handle(self):
-        # self.request is the TCP socket connected to the client
-        logger.info("handle - open_conn - " + self.client_address[0])
-        printer = Printer(logger)
+        src_ip = self.client_address[0]
+        global PORT
+        dest_port = PORT
+
+        # Add connection filter for logging src_ip and dest_port to every log record
+        connection_filter = ConnectionFilter(src_ip=src_ip, dest_port=dest_port)
+        logger.addFilter(connection_filter)
+
+        logger.info("Connection opened", extra={'action': 'open_conn', 'event': 'connection'})
         
+        printer = Printer(logger)
         emptyRequest = False
         while emptyRequest == False:
-
             # Wait a maximum of conn_timeout seconds for another request
-            # If conn_timeout elapses without request, close the connection
             ready = select.select([self.request], [], [], conn_timeout)
             if not ready[0]:
                 break
@@ -120,19 +179,24 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
             try:
                 self.data = self.request.recv(1024).strip()
             except Exception as e:
-                logger.error("handle - receive - Error receiving data - possible port scan")
+                logger.error(
+                    "Possible port scan", 
+                    extra={'action': 'receive', 'event': 'port_scan'}
+                )
                 emptyRequest = True
                 break
 
             request = self.data.decode('UTF-8')
-            request = request.replace('\x1b%-12345X', '')
+            request = request.replace('\\x1b%-12345X', '')
 
             if request[0:2] == '%!':
                 printer.receiving_postscript = True
                 printer.postscript_data = request
 
-                logger.info('handle - postscript - Received first postscript request of file')
-
+                logger.info(
+                    'Received first postscript request of file', 
+                    extra={'action': 'postscript', 'event': 'print_job'}
+                )
                 continue
             elif printer.receiving_postscript:
                 printer.postscript_data += request
@@ -140,28 +204,24 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
                 if '%%EOF' in request:
                     printer.save_postscript()
                     printer.receiving_postscript = False
-
                 continue
             
             commands = self.parse_commands(request)
 
-            logger.debug('handle - request - ' + str(request.encode('UTF-8')))
+            logger.debug('Request received', extra={'action': 'request', 'event': 'command_received'})
 
-            if len(commands) == 0:  # If we're sent an empty request, close the connection
+            if len(commands) == 0:
                 emptyRequest = True
                 break
 
             try:
                 response = ''
-
                 for command in commands:
                     command = command.lstrip()
-                    
                     if command.startswith("@PJL "):
                         command = command[5:]
                         if printer.printing_raw_job:
                             printer.save_raw_print_job()
-
                         if command.startswith("ECHO"):
                             response += printer.command_echo(command)
                         elif command.startswith("USTATUSOFF"):
@@ -183,29 +243,37 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
                         elif command.startswith("RDYMSG"):
                             response += printer.command_rdymsg(command)
                         else:
-                            logger.error("handle - cmd_unknown - " + str(command))
+                            logger.error(
+                                "Unknown command received", 
+                                extra={'action': 'cmd_unknown', 'command': str(command)}
+                            )
                     else:
                         response += printer.append_raw_print_job(command)
 
-                logger.info("handle - response - " + str(response.encode('UTF-8')))
+                logger.info("Response sent", extra={'action': 'response', 'event': 'response_sent'})
                 self.request.sendall(response.encode('UTF-8'))
 
             except Exception as e:
                 tb = sys.exc_info()[2]
                 traceback.print_tb(tb)
-                logger.error("handle - error_caught - " + str(e))
+                logger.error(
+                    "Error occurred while processing request", 
+                    extra={'action': 'error_caught', 'event': 'error', 'error': str(e)}
+                )
 
         if printer.printing_raw_job:
             printer.save_raw_print_job()
-        logger.info("handle - close_conn - " + self.client_address[0])
+
+        logger.info("Connection closed", extra={'action': 'close_conn', 'event': 'connection_closed'})
+
+        # Remove filter after connection is closed
+        logger.removeFilter(connection_filter)
+
 
 if __name__ == "__main__":
     HOST, PORT = args.host, 9100
 
     socketserver.TCPServer.allow_reuse_address = True
     server = socketserver.TCPServer((HOST, PORT), MyTCPHandler)
-    # Activate the server; this will keep running until you
-    # interrupt the program with Ctrl-C
-    server.allow_reuse_address = True
-    logger.info("main - start - Server started")
+    logger.info("Server started", extra={'action': 'start', 'event': 'server_start'})
     server.serve_forever()

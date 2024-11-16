@@ -54,16 +54,22 @@ class Printer:
     
 
     def append_raw_print_job(self, text):
-        self.logger.debug(("append_raw_print_job - append - " + text).encode('utf-8'))
+        self.logger.debug(
+            "Appending raw print job",
+            extra={'action': 'append', 'event': 'append_raw_print_job', 'job_text': repr(text.encode('utf-8'))}
+        )
         self.printing_raw_job = True
         self.current_raw_print_job += text
-        self.logger.info("append_raw_print_job - response - Sending empty response")
+        self.logger.info(
+            "Sending empty response",
+            extra={'action': 'response', 'event': 'empty_response'}
+        )
         return ''
 
 
     def get_parameters(self, command):
         '''
-            Gets key=value pairs seperated by either '=' or ' = '
+            Gets key=value pairs separated by either '=' or ' = '
             Notes:
                 - Whitespace can be either a space charater or a \t
                 - Whitespace is only required before a key
@@ -118,32 +124,35 @@ class Printer:
         file_contents = request[request.index(request_parameters["NAME"])+len(request_parameters["NAME"]):]
         file_name = request_parameters["NAME"].replace('"', '').split(":")[1]
         
-        self.logger.debug(("fsdownload - process - contents: " + file_contents).encode('utf-8'))
+        self.logger.debug(
+            "Processing download",
+            extra={'action': 'process', 'event': 'fsdownload', 'file_contents': file_contents}
+        )
 
         if file_contents[0:2] == '\r\n':  # Trim leading newline
-            self.logger.debug("fsdownload - process - Leading newline found")
+            self.logger.debug("Leading newline found", extra={'action': 'process', 'event': 'fsdownload'})
             file_contents = file_contents[2:]
 
         if file_contents[-2:] == '\r\n':  # Trim trailing newline
-            self.logger.debug("fsdownload - process - Trailing newline found")
+            self.logger.debug("Trailing newline found", extra={'action': 'process', 'event': 'fsdownload'})
             file_contents = file_contents[0:-2]
 
         # Check if path exists and is file
-        if (self.fos.path.exists(file_name)):
+        if self.fos.path.exists(file_name):
             a = self.fs.get_object(file_name)
             if isinstance(a, fake_filesystem.FakeFile) or isinstance(a, fake_filesystem.FakeFileFromRealFile):
                 self.fos.remove(file_name)
 
         self.fs.create_file(file_path=file_name, contents=file_contents)  # TODO: Handle errors if file exists or containing directory doesn't exist
-        self.logger.info("fsdownload - response - Sending empty response")
+        self.logger.info("Sending empty response", extra={'action': 'response', 'event': 'fsdownload'})
         return ''
 
 
     def command_echo(self, request):
-        self.logger.info("echo - request - Received request for delimiter")
+        self.logger.info("Received request for delimiter", extra={'action': 'request', 'event': 'echo'})
         response = "@PJL " + request
         response += '\x1b'
-        self.logger.info("echo - response - Responding with: " + str(response.encode('UTF-8')))
+        self.logger.info("Responding with echo", extra={'action': 'response', 'event': 'echo', 'response': str(response.encode('UTF-8'))})
         return response
     
     
@@ -151,7 +160,7 @@ class Printer:
         request_parameters = self.get_parameters(request)
         requested_dir = request_parameters["NAME"].replace('"', '').split(":")[1]
     
-        self.logger.debug("fsdirlist - request - Requested dir: '" + requested_dir + "'")
+        self.logger.debug("Requested directory listing", extra={'action': 'request', 'event': 'fsdirlist', 'dir': requested_dir})
         return_entries = ""
     
         if self.fos.path.exists(requested_dir):
@@ -166,38 +175,29 @@ class Printer:
             return_entries = "FILEERROR = 3" # "file not found"
     
         response = '@PJL FSDIRLIST NAME=' + request_parameters['NAME'] + return_entries
-        self.logger.info("fsdirlist - response - " + str(response.encode('UTF-8')))
+        self.logger.info("Directory listing response", extra={'action': 'response', 'event': 'fsdirlist', 'response': str(response.encode('UTF-8'))})
         return response
         
 
     def command_fsmkdir(self, request):
         request_parameters = self.get_parameters(request)
         requested_dir = request_parameters["NAME"].replace('"', '').split(":")[1]
-        self.logger.info("fsmkdir - request - " + requested_dir)
+        self.logger.info("Creating directory", extra={'action': 'request', 'event': 'fsmkdir', 'dir': requested_dir})
     
-        '''
-        Check if dir exists
-            If it does, do nothing and return empty ACK
-            If it doesn't, create dir and return empty ACK
-        '''
-        if self.fos.path.exists(requested_dir):
-            pass
-        else:
+        if not self.fos.path.exists(requested_dir):
             self.fs.create_dir(requested_dir)
     
-        self.logger.info("fsquery - response - Sending empty response")
+        self.logger.info("Directory created", extra={'action': 'response', 'event': 'fsmkdir'})
         return ''
     
     
     def command_fsquery(self, request):
         request_parameters = self.get_parameters(request)
-        self.logger.info("fsquery - request - " + request_parameters["NAME"])
-    
         requested_item = request_parameters["NAME"].replace('"', '').split(":")[1]
-        self.logger.debug("fsquery - request - requested_item: " + requested_item)
+        self.logger.debug("Requested item", extra={'action': 'request', 'event': 'fsquery', 'item': requested_item})
         return_data = ''
     
-        if (self.fos.path.exists(requested_item)):
+        if self.fos.path.exists(requested_item):
             if self.fos.path.isfile(requested_item):
                 size = self.fos.stat(requested_item).st_size
                 return_data = "NAME=" + request_parameters["NAME"] + " TYPE=FILE SIZE=" + str(size)
@@ -206,20 +206,18 @@ class Printer:
         else:
             return_data = "NAME=" + request_parameters["NAME"] + " FILEERROR=3\r\n" # File not found
     
-        response='@PJL FSQUERY ' + return_data
-        self.logger.info("fsquery - response - " + str(return_data.encode('UTF-8')))
+        response = '@PJL FSQUERY ' + return_data
+        self.logger.info("FSQUERY response", extra={'action': 'response', 'event': 'fsquery', 'response': str(return_data.encode('UTF-8'))})
         return response
     
 
     def command_fsupload(self, request):
         request_parameters = self.get_parameters(request)
-        self.logger.info("fsupload - request - " + request_parameters["NAME"])
-    
         upload_file = request_parameters["NAME"].replace('"', '').split(":")[1]
-        self.logger.debug("fsupload - request - requested file: " + upload_file)
+        self.logger.info("Upload file", extra={'action': 'request', 'event': 'fsupload', 'upload_file': upload_file})
         return_data = ''
 
-        if (self.fos.path.exists(upload_file)):
+        if self.fos.path.exists(upload_file):
             contents = ''
             file_module = fake_filesystem.FakeFileOpen(self.fs)
             for line in file_module(upload_file):
@@ -230,62 +228,60 @@ class Printer:
         else:
             return_data = 'NAME=' + request_parameters['NAME'] + '\r\nFILEERROR=3\r\n'
 
-        response='@PJL FSUPLOAD ' + return_data
-        self.logger.info("fsupload - response - " + str(response.encode('UTF-8')))
+        response = '@PJL FSUPLOAD ' + return_data
+        self.logger.info("Upload response", extra={'action': 'response', 'event': 'fsupload', 'response': str(response.encode('UTF-8'))})
         return response
 
     
     def command_info_id(self, request):
-        self.logger.info("info_id - request - ID requested")
+        self.logger.info("ID requested", extra={'action': 'request', 'event': 'info_id'})
         response = '@PJL INFO ID\r\n' + self.printer_id + '\r\n\x1b'
-        self.logger.info("info_id - response - " + str(response.encode('UTF-8')))
+        self.logger.info("ID response", extra={'action': 'response', 'event': 'info_id', 'response': str(response.encode('UTF-8'))})
         return response
         
 
     def command_info_status(self, request):
-        self.logger.info("info_status - request - Client requests status")
+        self.logger.info("Client requests status", extra={'action': 'request', 'event': 'info_status'})
         response = '@PJL INFO STATUS\r\nCODE=' + str(self.code) + '\r\nDISPLAY="' + self.ready_msg + '"\r\nONLINE=' + str(self.online)
-        self.logger.info("info_status - response - " + str(response.encode('UTF-8')))
+        self.logger.info("Status response", extra={'action': 'response', 'event': 'info_status', 'response': str(response.encode('UTF-8'))})
         return response
 
 
     def command_rdymsg(self, request):
         request_parameters = self.get_parameters(request)
         rdymsg = request_parameters["DISPLAY"]
-        self.logger.info("rdymsg - request - Ready message: " + rdymsg)
+        self.logger.info("Ready message", extra={'action': 'request', 'event': 'rdymsg', 'rdymsg': str(rdymsg.encode('UTF-8'))})
 
         self.ready_msg = rdymsg.replace('"', '')
-        self.logger.info("rdymsg - response - Sending back empty ACK")
+        self.logger.info("Ready message response", extra={'action': 'response', 'event': 'rdymsg'})
         return ''
 
 
     def command_ustatusoff(self, request):
-        self.logger.info("ustatusoff - request - Request received")
-        self.logger.info("ustatusoff - response - Sending empty reply")
+        self.logger.info("Request received", extra={'action': 'request', 'event': 'ustatusoff'})
+        self.logger.info("Sending empty reply", extra={'action': 'response', 'event': 'ustatusoff'})
         return ''
             
 
     def save_postscript(self):
-        filename = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S-%f") + ".ps"
+        file_name = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S-%f") + ".ps"
         if self.receiving_postscript:
-            self.logger.info("save_postscript - saving - " + filename)
-            with open("./uploads/" + filename, 'w') as f:
+            self.logger.info("Saving postscript file", extra={'action': 'saving', 'event': 'save_postscript', 'file_name': file_name})
+            with open("./uploads/" + file_name, 'w') as f:
                 f.write(self.postscript_data)
             self.postscript_data = ''
             self.receiving_postscript = False
         else:
-            self.logger.info("save_postscript - saving - Nothing to save!")
+            self.logger.info("Nothing to save", extra={'action': 'saving', 'event': 'save_postscript'})
 
 
     def save_raw_print_job(self):
-        # Save self.current_raw_print_job to local file
-        filename = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S-%f") + ".txt"
+        file_name = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S-%f") + ".txt"
         if self.current_raw_print_job:
-            self.logger.info("save_raw_print_job - saving - " + filename)
-            with open("./uploads/" + filename, 'w') as f:
+            self.logger.info("Saving raw print job", extra={'action': 'saving', 'event': 'save_raw_print_job', 'file_name': file_name})
+            with open("./uploads/" + file_name, 'w') as f:
                 f.write(self.current_raw_print_job)
             self.current_raw_print_job = ''
             self.printing_raw_job = False
         else:
-            self.logger.info("save_raw_print_job - saving - Nothing to save")
-
+            self.logger.info("Nothing to save", extra={'action': 'saving', 'event': 'save_raw_print_job'})
